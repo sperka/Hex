@@ -41,21 +41,6 @@ public enum ParakeetModel: String, CaseIterable, Sendable {
 		engine == .nemotronStreaming
 	}
 
-	/// Whether this model is fully wired end-to-end and safe to expose in the UI.
-	///
-	/// TODO(#236, Phase 2): the Nemotron streaming model has its abstraction and
-	/// curated entry in place but no streaming client/routing yet, so selecting
-	/// it would fail to download. Hide it from model lists until streaming lands,
-	/// then delete this flag and its call sites.
-	public var isSelectable: Bool {
-		switch engine {
-		case .tdtBatch:
-			return true
-		case .nemotronStreaming:
-			return false
-		}
-	}
-
 	/// Whether the model only supports English transcription.
 	public var isEnglishOnly: Bool {
 		self == .englishV2

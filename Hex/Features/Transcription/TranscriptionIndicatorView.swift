@@ -22,6 +22,9 @@ struct TranscriptionIndicatorView: View {
 
   var status: Status
   var meter: Meter
+  /// Live streaming transcript shown beneath the indicator while recording.
+  /// Empty hides it.
+  var partialText: String = ""
 
   let transcribeBaseColor: Color = .blue
   private var backgroundColor: Color {
@@ -155,7 +158,28 @@ struct TranscriptionIndicatorView: View {
         .transition(.opacity)
         .zIndex(2)
       }
+
+      // Live streaming transcript while recording.
+      if !partialText.isEmpty {
+        Text(partialText)
+          .font(.system(size: 12, weight: .medium))
+          .foregroundColor(.white)
+          .lineLimit(2)
+          .truncationMode(.head)
+          .multilineTextAlignment(.center)
+          .frame(maxWidth: 280)
+          .padding(.horizontal, 10)
+          .padding(.vertical, 6)
+          .background(
+            RoundedRectangle(cornerRadius: 6)
+              .fill(Color.black.opacity(0.8))
+          )
+          .offset(y: -28)
+          .transition(.opacity)
+          .zIndex(3)
+      }
     }
+    .animation(.easeInOut(duration: 0.15), value: partialText)
     .enableInjection()
   }
 }

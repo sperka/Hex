@@ -27,6 +27,16 @@ struct TranscriptionFeature {
     var meter: Meter = .init(averagePower: 0, peakPower: 0)
     var sourceAppBundleID: String?
     var sourceAppName: String?
+    /// Whether the in-flight recording uses a live streaming model.
+    var isStreaming: Bool = false
+    /// Running transcript from the streaming model, shown live when enabled.
+    var partialTranscript: String = ""
+    /// WAV URL + duration captured at stop, awaiting the streaming `.final` text
+    /// so history/paste can be finalized once both halves have arrived.
+    var pendingStreamingAudioURL: URL?
+    var pendingStreamingDuration: TimeInterval?
+    /// Final streaming text that arrived before the WAV URL was ready, if any.
+    var pendingStreamingFinalText: String?
     @Shared(.hexSettings) var hexSettings: HexSettings
     @Shared(.isRemappingScratchpadFocused) var isRemappingScratchpadFocused: Bool = false
     @Shared(.modelBootstrapState) var modelBootstrapState: ModelBootstrapState
@@ -53,6 +63,11 @@ struct TranscriptionFeature {
     case transcriptionResult(String, URL, TimeInterval)
     case transcriptionError(Error, URL?)
 
+    // Streaming flow
+    case streamingPartial(String)
+    case streamingFinal(String)
+    case streamingAudioReady(URL, TimeInterval)
+
     // Model availability
     case modelMissing
   }
@@ -62,6 +77,7 @@ struct TranscriptionFeature {
     case recordingStart
     case recordingCleanup
     case transcription
+    case streaming
   }
 
   @Dependency(\.transcription) var transcription
@@ -122,6 +138,17 @@ struct TranscriptionFeature {
 
       case let .transcriptionError(error, audioURL):
         return handleTranscriptionError(&state, error: error, audioURL: audioURL)
+
+      case let .streamingPartial(text):
+        // Cumulative running transcript from the streaming model.
+        state.partialTranscript = text
+        return .none
+
+      case let .streamingFinal(text):
+        return handleStreamingFinal(&state, finalText: text)
+
+      case let .streamingAudioReady(url, duration):
+        return handleStreamingAudioReady(&state, audioURL: url, duration: duration)
 
       case .modelMissing:
         return .none
@@ -291,33 +318,91 @@ private extension TranscriptionFeature {
     state.isRecording = true
     let startTime = now
     state.recordingStartTime = startTime
-    
+
+    // Reset any prior streaming session state.
+    let model = state.hexSettings.selectedModel
+    let streaming = transcription.isStreamingModel(model)
+    state.isStreaming = streaming
+    state.partialTranscript = ""
+    state.pendingStreamingAudioURL = nil
+    state.pendingStreamingDuration = nil
+    state.pendingStreamingFinalText = nil
+
     // Capture the active application
     if let activeApp = NSWorkspace.shared.frontmostApplication {
       state.sourceAppBundleID = activeApp.bundleIdentifier
       state.sourceAppName = activeApp.localizedName
     }
-    transcriptionFeatureLogger.notice("Recording started at \(startTime.ISO8601Format())")
+    transcriptionFeatureLogger.notice("Recording started at \(startTime.ISO8601Format()) streaming=\(streaming)")
 
     // Prevent system sleep during recording
+    let recordEffect: Effect<Action> = .run { [sleepManagement, preventSleep = state.hexSettings.preventSystemSleep] _ in
+      // Play sound immediately for instant feedback
+      soundEffect.play(.startRecording)
+
+      if preventSleep {
+        await sleepManagement.preventSleep(reason: "Hex Voice Recording")
+      }
+      guard !Task.isCancelled else {
+        if preventSleep {
+          await sleepManagement.allowSleep()
+        }
+        return
+      }
+      await recording.startRecording()
+    }
+    .cancellable(id: CancelID.recordingStart, cancelInFlight: true)
+
+    guard streaming else {
+      return .merge(.cancel(id: CancelID.recordingCleanup), recordEffect)
+    }
+
+    // Streaming: decode live while recording. The samples stream ends when
+    // stopRecording() finishes it, which drives the terminal `.final`.
+    let chunkMs = state.hexSettings.nemotronChunkMs
+    // Map the user's output language to a FluidAudio code: en* -> en-US,
+    // otherwise "auto" for the full multilingual vocab.
+    let languageCode = (state.hexSettings.outputLanguage?.lowercased().hasPrefix("en") ?? false) ? "en-US" : "auto"
+    // One ordered effect owns the streaming session so the sample sink is
+    // installed (observeAudioSamples) *before* recording starts; otherwise the
+    // pre-roll fed in beginRecording would race the sink install and be dropped.
+    let streamingEffect: Effect<Action> = .run { [sleepManagement, preventSleep = state.hexSettings.preventSystemSleep] send in
+      soundEffect.play(.startRecording)
+      if preventSleep {
+        await sleepManagement.preventSleep(reason: "Hex Voice Recording")
+      }
+      guard !Task.isCancelled else {
+        if preventSleep {
+          await sleepManagement.allowSleep()
+        }
+        return
+      }
+      // Install the sink first, then start recording so pre-roll is captured.
+      let samples = await recording.observeAudioSamples()
+      await recording.startRecording()
+      let updates = await transcription.transcribeStreaming(samples, model, chunkMs, languageCode)
+      do {
+        for try await update in updates {
+          switch update {
+          case let .partial(text):
+            await send(.streamingPartial(text))
+          case let .final(text):
+            await send(.streamingFinal(text))
+          }
+        }
+      } catch {
+        await send(.transcriptionError(error, nil))
+      }
+    }
+    .cancellable(id: CancelID.streaming, cancelInFlight: true)
+
+    // Cancel any stale stop/finalize from a prior session (e.g. a double-tap
+    // re-trigger arriving mid-rendezvous) so its late half can't pair with this
+    // recording's audio.
     return .merge(
       .cancel(id: CancelID.recordingCleanup),
-      .run { [sleepManagement, preventSleep = state.hexSettings.preventSystemSleep] _ in
-        // Play sound immediately for instant feedback
-        soundEffect.play(.startRecording)
-
-        if preventSleep {
-          await sleepManagement.preventSleep(reason: "Hex Voice Recording")
-        }
-        guard !Task.isCancelled else {
-          if preventSleep {
-            await sleepManagement.allowSleep()
-          }
-          return
-        }
-        await recording.startRecording()
-      }
-      .cancellable(id: CancelID.recordingStart, cancelInFlight: true)
+      .cancel(id: CancelID.transcription),
+      streamingEffect
     )
   }
 
@@ -360,6 +445,27 @@ private extension TranscriptionFeature {
 
     state.isPrewarming = true
 
+    // Streaming: the live effect (started at record-start) is already decoding.
+    // Stop the recorder to flush + end the samples stream, which triggers the
+    // streaming `.final`. Stash the WAV URL + duration so `.streamingFinal` can
+    // finalize history/paste once both halves are present.
+    if state.isStreaming {
+      return .merge(
+        .cancel(id: CancelID.recordingStart),
+        .run { send in
+          await sleepManagement.allowSleep()
+          let capturedURL = await recording.stopRecording()
+          guard !Task.isCancelled else {
+            FileManager.default.removeItemIfExists(at: capturedURL)
+            return
+          }
+          soundEffect.play(.stopRecording)
+          await send(.streamingAudioReady(capturedURL, duration))
+        }
+        .cancellable(id: CancelID.transcription)
+      )
+    }
+
     return .merge(
       .cancel(id: CancelID.recordingStart),
       .run { [sleepManagement] send in
@@ -397,6 +503,52 @@ private extension TranscriptionFeature {
         }
       }
       .cancellable(id: CancelID.transcription)
+    )
+  }
+}
+
+// MARK: - Streaming Handlers
+
+private extension TranscriptionFeature {
+  /// The streaming model emitted its terminal transcript. Finalize if the WAV
+  /// URL has already arrived; otherwise stash it for the rendezvous.
+  func handleStreamingFinal(_ state: inout State, finalText: String) -> Effect<Action> {
+    guard let url = state.pendingStreamingAudioURL,
+          let duration = state.pendingStreamingDuration
+    else {
+      state.pendingStreamingFinalText = finalText
+      return .none
+    }
+    return finalizeStreaming(&state, finalText: finalText, audioURL: url, duration: duration)
+  }
+
+  /// The WAV URL + duration are ready post-stop. Finalize if the streaming
+  /// `.final` text already arrived; otherwise stash and wait for it.
+  func handleStreamingAudioReady(_ state: inout State, audioURL: URL, duration: TimeInterval) -> Effect<Action> {
+    guard let finalText = state.pendingStreamingFinalText else {
+      state.pendingStreamingAudioURL = audioURL
+      state.pendingStreamingDuration = duration
+      return .none
+    }
+    return finalizeStreaming(&state, finalText: finalText, audioURL: audioURL, duration: duration)
+  }
+
+  /// Both halves present: clear streaming state and route through the shared
+  /// result path (word remap/removal, paste, history, force-quit detection).
+  func finalizeStreaming(
+    _ state: inout State,
+    finalText: String,
+    audioURL: URL,
+    duration: TimeInterval
+  ) -> Effect<Action> {
+    state.isStreaming = false
+    state.partialTranscript = ""
+    state.pendingStreamingAudioURL = nil
+    state.pendingStreamingDuration = nil
+    state.pendingStreamingFinalText = nil
+    return .merge(
+      .cancel(id: CancelID.streaming),
+      handleTranscriptionResult(&state, result: finalText, audioURL: audioURL, duration: duration)
     )
   }
 }
@@ -491,12 +643,35 @@ private extension TranscriptionFeature {
     state.isTranscribing = false
     state.isPrewarming = false
     state.error = error.localizedDescription
-    
+
+    let wasStreaming = state.isStreaming
+    // A streaming error can fire mid-recording (e.g. model load/decode failure),
+    // when isRecording is still true and the mic is live. Tear the session down.
+    let wasRecording = state.isRecording
+    state.isRecording = false
+    // Any WAV stashed for the streaming rendezvous must be cleaned up too.
+    let pendingURL = state.pendingStreamingAudioURL
+    resetStreamingState(&state)
+
     if let audioURL {
       FileManager.default.removeItemIfExists(at: audioURL)
     }
+    if let pendingURL {
+      FileManager.default.removeItemIfExists(at: pendingURL)
+    }
 
-    return .none
+    guard wasStreaming else { return .none }
+    return .merge(
+      .cancel(id: CancelID.streaming),
+      .run { [sleepManagement] _ in
+        await sleepManagement.allowSleep()
+        if wasRecording {
+          let url = await recording.stopRecording()
+          FileManager.default.removeItemIfExists(at: url)
+        }
+      }
+      .cancellable(id: CancelID.recordingCleanup, cancelInFlight: true)
+    )
   }
 
   /// Move file to permanent location, create a transcript record, paste text, and play sound.
@@ -549,10 +724,12 @@ private extension TranscriptionFeature {
     state.isTranscribing = false
     state.isRecording = false
     state.isPrewarming = false
+    resetStreamingState(&state)
 
     return .merge(
       .cancel(id: CancelID.transcription),
       .cancel(id: CancelID.recordingStart),
+      .cancel(id: CancelID.streaming),
       .run { [sleepManagement] _ in
         // Allow system to sleep again
         await sleepManagement.allowSleep()
@@ -573,10 +750,12 @@ private extension TranscriptionFeature {
   func handleDiscard(_ state: inout State) -> Effect<Action> {
     state.isRecording = false
     state.isPrewarming = false
+    resetStreamingState(&state)
 
     // Silently discard - no sound effect
     return .merge(
       .cancel(id: CancelID.recordingStart),
+      .cancel(id: CancelID.streaming),
       .run { [sleepManagement] _ in
         // Allow system to sleep again
         await sleepManagement.allowSleep()
@@ -586,6 +765,14 @@ private extension TranscriptionFeature {
       }
       .cancellable(id: CancelID.recordingCleanup, cancelInFlight: true)
     )
+  }
+
+  func resetStreamingState(_ state: inout State) {
+    state.isStreaming = false
+    state.partialTranscript = ""
+    state.pendingStreamingAudioURL = nil
+    state.pendingStreamingDuration = nil
+    state.pendingStreamingFinalText = nil
   }
 }
 
@@ -607,10 +794,20 @@ struct TranscriptionView: View {
     }
   }
 
+  /// Live partial transcript to show, or empty when disabled / not streaming.
+  var livePartial: String {
+    guard store.hexSettings.showLivePartials,
+          store.isStreaming,
+          store.isRecording
+    else { return "" }
+    return store.partialTranscript
+  }
+
   var body: some View {
     TranscriptionIndicatorView(
       status: status,
-      meter: store.meter
+      meter: store.meter,
+      partialText: livePartial
     )
     .task {
       await store.send(.task).finish()
