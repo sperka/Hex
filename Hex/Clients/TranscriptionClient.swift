@@ -6,6 +6,7 @@
 //
 
 import AVFoundation
+import ComposableArchitecture
 import Dependencies
 import DependenciesMacros
 import Foundation
@@ -110,6 +111,17 @@ actor TranscriptionClientLive {
   /// Ensures the given `variant` model is downloaded and loaded, reporting
   /// overall progress (0%–50% for downloading, 50%–100% for loading).
   func downloadAndLoadModel(variant: String, progressCallback: @escaping (Progress) -> Void) async throws {
+    // Streaming models (Nemotron) load via their own client and variant params.
+    if isStreaming(variant) {
+      let params = nemotronParams()
+      try await nemotron.ensureLoaded(
+        chunkMs: params.chunkMs,
+        languageCode: params.languageCode,
+        progress: progressCallback
+      )
+      currentModelName = variant
+      return
+    }
     // If Parakeet, use Parakeet client path
     if isParakeet(variant) {
       try await parakeet.ensureLoaded(modelName: variant, progress: progressCallback)
@@ -162,6 +174,12 @@ actor TranscriptionClientLive {
 
   /// Deletes a model from disk if it exists
   func deleteModel(variant: String) async throws {
+    if isStreaming(variant) {
+      let params = nemotronParams()
+      try await nemotron.deleteCaches(chunkMs: params.chunkMs, languageCode: params.languageCode)
+      if currentModelName == variant { unloadCurrentModel() }
+      return
+    }
     if isParakeet(variant) {
       try await parakeet.deleteCaches(modelName: variant)
       if currentModelName == variant { unloadCurrentModel() }
@@ -189,6 +207,12 @@ actor TranscriptionClientLive {
   /// Returns `true` if the model is already downloaded to the local folder.
   /// Performs a thorough check to ensure the model files are actually present and usable.
   func isModelDownloaded(_ modelName: String) async -> Bool {
+    if isStreaming(modelName) {
+      let params = nemotronParams()
+      let available = await nemotron.isModelAvailable(chunkMs: params.chunkMs, languageCode: params.languageCode)
+      parakeetLogger.debug("Nemotron available? \(available)")
+      return available
+    }
     if isParakeet(modelName) {
       let available = await parakeet.isModelAvailable(modelName)
       parakeetLogger.debug("Parakeet available? \(available)")
@@ -233,7 +257,7 @@ actor TranscriptionClientLive {
   func getAvailableModels() async throws -> [String] {
     var names = try await WhisperKit.fetchAvailableModels()
     #if canImport(FluidAudio)
-    for model in ParakeetModel.allCases.reversed() where model.isSelectable {
+    for model in ParakeetModel.allCases.reversed() {
       if !names.contains(model.identifier) { names.insert(model.identifier, at: 0) }
     }
     #endif
@@ -250,6 +274,14 @@ actor TranscriptionClientLive {
     progressCallback: @escaping (Progress) -> Void
   ) async throws -> String {
     let startAll = Date()
+    if isStreaming(model) {
+      // Streaming models decode live via transcribeStreaming, not from a file.
+      throw NSError(
+        domain: "TranscriptionClient",
+        code: -5,
+        userInfo: [NSLocalizedDescriptionKey: "\(model) is a streaming model; use transcribeStreaming, not file-based transcribe"]
+      )
+    }
     if isParakeet(model) {
       transcriptionLogger.notice("Transcribing with Parakeet model=\(model) file=\(url.lastPathComponent)")
       let startLoad = Date()
@@ -326,6 +358,21 @@ actor TranscriptionClientLive {
   /// Whether `name` is a streaming model (decodes live during recording).
   static func isStreamingModel(_ name: String) -> Bool {
     ParakeetModel(rawValue: name)?.isStreaming ?? false
+  }
+
+  private func isStreaming(_ name: String) -> Bool {
+    Self.isStreamingModel(name)
+  }
+
+  /// Streaming variant parameters derived from user settings: the chunk-size
+  /// tier and a FluidAudio language code (`en*` → `en-US`, otherwise `"auto"`
+  /// for the full multilingual vocab).
+  private func nemotronParams() -> (chunkMs: Int, languageCode: String) {
+    @Shared(.hexSettings) var hexSettings: HexSettings
+    let chunkMs = hexSettings.nemotronChunkMs
+    let language = hexSettings.outputLanguage?.lowercased()
+    let languageCode = (language?.hasPrefix("en") ?? false) ? "en-US" : "auto"
+    return (chunkMs, languageCode)
   }
 
   /// Drives a streaming transcription session: loads the variant, installs the

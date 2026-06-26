@@ -31,6 +31,7 @@ struct RecordingClient {
   var stopRecording: @Sendable () async -> URL = { URL(fileURLWithPath: "") }
   var requestMicrophoneAccess: @Sendable () async -> Bool = { false }
   var observeAudioLevel: @Sendable () async -> AsyncStream<Meter> = { AsyncStream { _ in } }
+  var observeAudioSamples: @Sendable () async -> AsyncStream<[Float]> = { AsyncStream { _ in } }
   var getAvailableInputDevices: @Sendable () async -> [AudioInputDevice] = { [] }
   var getDefaultInputDeviceName: @Sendable () async -> String? = { nil }
   var warmUpRecorder: @Sendable () async -> Void = {}
@@ -48,6 +49,7 @@ extension RecordingClient: DependencyKey {
       stopRecording: { await live.stopRecording() },
       requestMicrophoneAccess: { await live.requestMicrophoneAccess() },
       observeAudioLevel: { await live.observeAudioLevel() },
+      observeAudioSamples: { await live.observeAudioSamples() },
       getAvailableInputDevices: { await live.getAvailableInputDevices() },
       getDefaultInputDeviceName: { await live.getDefaultInputDeviceName() },
       warmUpRecorder: { await live.warmUpRecorder() },
@@ -349,6 +351,8 @@ actor RecordingClientLive {
   ]
   private let (meterStream, meterContinuation) = AsyncStream<Meter>.makeStream()
   private var meterTask: Task<Void, Never>?
+  /// Continuation for the active streaming-samples observer, if any.
+  private var sampleContinuation: AsyncStream<[Float]>.Continuation?
   private lazy var captureController = SuperFastCaptureController(
     meterContinuation: meterContinuation,
     onEngineConfigurationChange: { [weak self] in
@@ -1167,6 +1171,9 @@ actor RecordingClientLive {
         backend: .captureEngine
       )
       let recordingDuration = stoppedAt.timeIntervalSince(session.startedAt)
+      // finishRecording() cleared activeRecording, so no further samples will be
+      // fed; end the streaming-samples stream so its consumer can finalize.
+      finishSampleObserver()
       stopMeterTask()
       endRecordingSession()
       clearActiveRecordingMetadata()
@@ -1195,6 +1202,7 @@ actor RecordingClientLive {
     let wasRecording = recorder?.isRecording == true
     guard session.backend == .recorderFallback, wasRecording else {
       recordingLogger.notice("stopRecording() called without an active recorder fallback; skipping stale recording.wav export")
+      finishSampleObserver()
       stopMeterTask()
       endRecordingSession()
       clearActiveRecordingMetadata()
@@ -1204,6 +1212,7 @@ actor RecordingClientLive {
       return makeIgnoredStopURL()
     }
     recorder?.stop()
+    finishSampleObserver()
     stopMeterTask()
     endRecordingSession()
     clearActiveRecordingMetadata()
@@ -1419,6 +1428,40 @@ actor RecordingClientLive {
 
   func observeAudioLevel() -> AsyncStream<Meter> {
     meterStream
+  }
+
+  /// A stream of converted 16 kHz mono Float32 sample chunks captured while
+  /// recording, for streaming transcription. A new call replaces any prior
+  /// observer. The capture sink is cleared when the stream terminates.
+  ///
+  /// Only the capture-engine backend feeds this; the `AVAudioRecorder` fallback
+  /// has no live PCM tap, so streaming models require the capture engine.
+  func observeAudioSamples() -> AsyncStream<[Float]> {
+    sampleContinuation?.finish()
+    let (stream, continuation) = AsyncStream<[Float]>.makeStream()
+    sampleContinuation = continuation
+    captureController.setConvertedSamplesHandler { samples in
+      continuation.yield(samples)
+    }
+    continuation.onTermination = { [weak self] _ in
+      guard let self else { return }
+      Task { await self.clearSampleObserver() }
+    }
+    return stream
+  }
+
+  private func clearSampleObserver() {
+    captureController.setConvertedSamplesHandler(nil)
+    sampleContinuation = nil
+  }
+
+  /// Ends the streaming-samples stream so its consumer's `for await` loop
+  /// completes and the streaming model can finalize. Safe to call when no
+  /// observer is active.
+  private func finishSampleObserver() {
+    captureController.setConvertedSamplesHandler(nil)
+    sampleContinuation?.finish()
+    sampleContinuation = nil
   }
 
   func warmUpRecorder() async {

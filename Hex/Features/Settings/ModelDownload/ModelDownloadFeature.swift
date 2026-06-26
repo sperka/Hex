@@ -263,7 +263,7 @@ public struct ModelDownloadFeature {
 			state.isLoadingModels = false
 			// Ensure our curated Parakeet options are visible even if WhisperKit doesn't list them
 			var availablePlus = available
-			for model in ParakeetModel.allCases.reversed() where model.isSelectable {
+			for model in ParakeetModel.allCases.reversed() {
 				if !availablePlus.contains(where: { $0.name == model.identifier }) {
 					availablePlus.insert(ModelInfo(name: model.identifier, isDownloaded: false), at: 0)
 				}
@@ -283,10 +283,8 @@ public struct ModelDownloadFeature {
 				}
 			}
 
-			// Merge curated + download status with pattern support.
-			// Drop curated entries whose model isn't selectable yet (e.g. the
-			// Nemotron streaming model before its client lands - see #236 Phase 2).
-			var curated = CuratedModelLoader.load().filter { $0.parakeetModel?.isSelectable ?? true }
+			// Merge curated + download status with pattern support
+			var curated = CuratedModelLoader.load()
 			for idx in curated.indices {
 				let internalName = curated[idx].internalName
 				if let match = available.first(where: { ModelPatternMatcher.matches(internalName, $0.name) }) {

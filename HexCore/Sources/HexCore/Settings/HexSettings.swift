@@ -47,10 +47,23 @@ public struct HexSettings: Codable, Equatable, Sendable {
 	public var wordRemovalsEnabled: Bool
 	public var wordRemovals: [WordRemoval]
 	public var wordRemappings: [WordRemapping]
+	public var nemotronChunkMs: Int
+	public var showLivePartials: Bool
+
+	/// Allowed Nemotron streaming chunk-size tiers in milliseconds. 560 ms gives
+	/// the lowest latency but degrades punctuation on long sessions (FluidAudio
+	/// issue #687); 2240 ms is the default.
+	public static let allowedNemotronChunkMs = [560, 1120, 2240, 4480]
 
 	private mutating func normalizeDoubleTapSettings() {
 		if !doubleTapLockEnabled {
 			useDoubleTapOnly = false
+		}
+	}
+
+	private mutating func normalizeNemotronChunkMs() {
+		if !HexSettings.allowedNemotronChunkMs.contains(nemotronChunkMs) {
+			nemotronChunkMs = 2240
 		}
 	}
 
@@ -78,7 +91,9 @@ public struct HexSettings: Codable, Equatable, Sendable {
 		hasCompletedStorageMigration: Bool = false,
 		wordRemovalsEnabled: Bool = false,
 		wordRemovals: [WordRemoval] = HexSettings.defaultWordRemovals,
-		wordRemappings: [WordRemapping] = []
+		wordRemappings: [WordRemapping] = [],
+		nemotronChunkMs: Int = 2240,
+		showLivePartials: Bool = true
 	) {
 		self.soundEffectsEnabled = soundEffectsEnabled
 		self.soundEffectsVolume = soundEffectsVolume
@@ -104,7 +119,10 @@ public struct HexSettings: Codable, Equatable, Sendable {
 		self.wordRemovalsEnabled = wordRemovalsEnabled
 		self.wordRemovals = wordRemovals
 		self.wordRemappings = wordRemappings
+		self.nemotronChunkMs = nemotronChunkMs
+		self.showLivePartials = showLivePartials
 		normalizeDoubleTapSettings()
+		normalizeNemotronChunkMs()
 	}
 
 	public init(from decoder: Decoder) throws {
@@ -114,6 +132,7 @@ public struct HexSettings: Codable, Equatable, Sendable {
 			try field.decode(into: &self, from: container)
 		}
 		normalizeDoubleTapSettings()
+		normalizeNemotronChunkMs()
 	}
 
 	public func encode(to encoder: Encoder) throws {
@@ -152,6 +171,8 @@ private enum HexSettingKey: String, CodingKey, CaseIterable {
 	case wordRemovalsEnabled
 	case wordRemovals
 	case wordRemappings
+	case nemotronChunkMs
+	case showLivePartials
 }
 
 private struct SettingsField<Value: Codable & Sendable> {
@@ -284,6 +305,8 @@ private enum HexSettingsSchema {
 			.wordRemappings,
 			keyPath: \.wordRemappings,
 			default: defaults.wordRemappings
-		).eraseToAny()
+		).eraseToAny(),
+		SettingsField(.nemotronChunkMs, keyPath: \.nemotronChunkMs, default: defaults.nemotronChunkMs).eraseToAny(),
+		SettingsField(.showLivePartials, keyPath: \.showLivePartials, default: defaults.showLivePartials).eraseToAny()
 	]
 }

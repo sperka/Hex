@@ -28,6 +28,10 @@ struct SettingsView: View {
 			if ParakeetModel(rawValue: store.hexSettings.selectedModel) == nil {
 				LanguageSectionView(store: store)
 			}
+			// Streaming options apply only to live streaming models (e.g. Nemotron)
+			if ParakeetModel(rawValue: store.hexSettings.selectedModel)?.isStreaming == true {
+				StreamingSectionView(store: store)
+			}
 
 			HotKeySectionView(store: store)
           

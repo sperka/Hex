@@ -120,6 +120,12 @@ final class SuperFastCaptureController {
   private var recentBufferDurations: [TimeInterval] = []
   private let onEngineConfigurationChange: @Sendable () -> Void
 
+  /// Optional sink for converted 16 kHz mono Float32 samples while recording,
+  /// used by streaming transcription. Invoked on `processingQueue` in capture
+  /// order (including the pre-roll prepended at `beginRecording`). The WAV file
+  /// write is unaffected. Set/cleared via `setConvertedSamplesHandler`.
+  private var onConvertedSamples: (@Sendable ([Float]) -> Void)?
+
   init(
     meterContinuation: AsyncStream<Meter>.Continuation,
     onEngineConfigurationChange: @escaping @Sendable () -> Void
@@ -278,6 +284,9 @@ final class SuperFastCaptureController {
         let prependedDuration = Double(preRollSamples.count) / SuperFastCaptureConstants.sampleRate
         if !preRollSamples.isEmpty {
           try write(samples: preRollSamples, to: file)
+          // Feed pre-roll to the streaming sink first so the first word isn't
+          // clipped, matching the order it lands in the WAV file.
+          onConvertedSamples?(preRollSamples)
         }
 
         logger.notice(
@@ -318,6 +327,14 @@ final class SuperFastCaptureController {
     }
   }
 
+  /// Installs (or clears, with `nil`) the converted-samples sink. Synchronized
+  /// on `processingQueue` so it never races the `process(_:)` reader.
+  func setConvertedSamplesHandler(_ handler: (@Sendable ([Float]) -> Void)?) {
+    processingQueue.sync {
+      onConvertedSamples = handler
+    }
+  }
+
   private func enqueue(_ buffer: AVAudioPCMBuffer) {
     guard let copy = clone(buffer) else { return }
     processingQueue.async { [weak self] in
@@ -347,6 +364,9 @@ final class SuperFastCaptureController {
 
     if activeRecording != nil {
       meterContinuation.yield(meter(for: samples, count: sampleCount))
+      if let onConvertedSamples {
+        onConvertedSamples(Array(UnsafeBufferPointer(start: samples, count: sampleCount)))
+      }
     }
 
     guard var recording = activeRecording else { return }
