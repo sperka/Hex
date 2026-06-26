@@ -211,7 +211,7 @@ actor TranscriptionClientLive {
   func getAvailableModels() async throws -> [String] {
     var names = try await WhisperKit.fetchAvailableModels()
     #if canImport(FluidAudio)
-    for model in ParakeetModel.allCases.reversed() {
+    for model in ParakeetModel.allCases.reversed() where model.isSelectable {
       if !names.contains(model.identifier) { names.insert(model.identifier, at: 0) }
     }
     #endif

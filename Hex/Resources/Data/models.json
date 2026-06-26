@@ -16,6 +16,14 @@
     "storageSize": "650MB"
   },
   {
+    "displayName": "Nemotron 3.5 Streaming",
+    "internalName": "nemotron-3.5-asr-streaming-0.6b-coreml",
+    "size": "Multilingual",
+    "accuracyStars": 5,
+    "speedStars": 4,
+    "storageSize": "600MB"
+  },
+  {
     "displayName": "Whisper Small (Tiny)",
     "internalName": "openai_whisper-tiny",
     "size": "Multilingual",
