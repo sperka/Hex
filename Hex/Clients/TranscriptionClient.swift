@@ -16,6 +16,14 @@ private let transcriptionLogger = HexLog.transcription
 private let modelsLogger = HexLog.models
 private let parakeetLogger = HexLog.parakeet
 
+/// A live transcription update emitted by a streaming model.
+enum TranscriptionUpdate: Sendable, Equatable {
+  /// Running hypothesis, refined as more audio is decoded.
+  case partial(String)
+  /// Terminal transcript for the utterance.
+  case final(String)
+}
+
 /// A client that downloads and loads WhisperKit models, then transcribes audio files using the loaded model.
 /// Exposes progress callbacks to report overall download-and-load percentage and transcription progress.
 @DependencyClient
@@ -38,6 +46,17 @@ struct TranscriptionClient {
 
   /// Lists all model variants found in `argmaxinc/whisperkit-coreml`.
   var getAvailableModels: @Sendable () async throws -> [String]
+
+  /// Whether the named model decodes live during recording (vs. file-based).
+  var isStreamingModel: @Sendable (String) -> Bool = { _ in false }
+
+  /// Transcribes live from a stream of 16 kHz mono Float32 sample chunks using a
+  /// streaming model. Emits `.partial` updates as audio is decoded and a terminal
+  /// `.final` when `samples` ends; the returned stream throws on load/decode
+  /// failure. Loads the requested variant (downloading if needed) before decoding.
+  var transcribeStreaming: @Sendable (_ samples: AsyncStream<[Float]>, _ model: String, _ chunkMs: Int, _ languageCode: String) async -> AsyncThrowingStream<TranscriptionUpdate, Error> = { _, _, _, _ in
+    AsyncThrowingStream { $0.finish() }
+  }
 }
 
 extension TranscriptionClient: DependencyKey {
@@ -49,7 +68,9 @@ extension TranscriptionClient: DependencyKey {
       deleteModel: { try await live.deleteModel(variant: $0) },
       isModelDownloaded: { await live.isModelDownloaded($0) },
       getRecommendedModels: { await live.getRecommendedModels() },
-      getAvailableModels: { try await live.getAvailableModels() }
+      getAvailableModels: { try await live.getAvailableModels() },
+      isStreamingModel: { TranscriptionClientLive.isStreamingModel($0) },
+      transcribeStreaming: { await live.transcribeStreaming(samples: $0, model: $1, chunkMs: $2, languageCode: $3) }
     )
   }
 }
@@ -73,6 +94,7 @@ actor TranscriptionClientLive {
   /// The name of the currently loaded model, if any.
   private var currentModelName: String?
   private var parakeet: ParakeetClient = ParakeetClient()
+  private var nemotron: NemotronStreamingClient = NemotronStreamingClient()
 
   /// The base folder under which we store model data (e.g., ~/Library/Application Support/...).
   private lazy var modelsBaseFolder: URL = {
@@ -299,6 +321,45 @@ actor TranscriptionClientLive {
 
   private func isParakeet(_ name: String) -> Bool {
     ParakeetModel(rawValue: name) != nil
+  }
+
+  /// Whether `name` is a streaming model (decodes live during recording).
+  static func isStreamingModel(_ name: String) -> Bool {
+    ParakeetModel(rawValue: name)?.isStreaming ?? false
+  }
+
+  /// Drives a streaming transcription session: loads the variant, installs the
+  /// partial callback, feeds incoming sample chunks in arrival order, and emits
+  /// a terminal `.final` when the input stream ends.
+  func transcribeStreaming(
+    samples: AsyncStream<[Float]>,
+    model: String,
+    chunkMs: Int,
+    languageCode: String
+  ) -> AsyncThrowingStream<TranscriptionUpdate, Error> {
+    let nemotron = self.nemotron
+    return AsyncThrowingStream { continuation in
+      let task = Task {
+        do {
+          // Partials arrive as the cumulative running transcript; forward each.
+          try await nemotron.ensureLoaded(chunkMs: chunkMs, languageCode: languageCode) { _ in }
+          try await nemotron.startUtterance { partial in
+            continuation.yield(.partial(partial))
+          }
+          // Single serial consumer preserves frame order across the actor.
+          for await chunk in samples {
+            try Task.checkCancellation()
+            try await nemotron.feed(samples: chunk)
+          }
+          let finalText = try await nemotron.finishUtterance()
+          continuation.yield(.final(finalText))
+          continuation.finish()
+        } catch {
+          continuation.finish(throwing: error)
+        }
+      }
+      continuation.onTermination = { _ in task.cancel() }
+    }
   }
 
   /// Creates or returns the local folder (on disk) for a given `variant` model.
