@@ -52,6 +52,13 @@ actor ParakeetClient {
         userInfo: [NSLocalizedDescriptionKey: "Unsupported Parakeet variant: \(modelName)"]
       )
     }
+    guard let asrVersion = variant.asrVersion else {
+      throw NSError(
+        domain: "Parakeet",
+        code: -5,
+        userInfo: [NSLocalizedDescriptionKey: "ParakeetClient handles batch TDT models only; \(modelName) is not one"]
+      )
+    }
     if currentVariant == variant, asr != nil { return }
     if currentVariant != variant {
       asr = nil
@@ -82,7 +89,7 @@ actor ParakeetClient {
     defer { pollTask.cancel() }
 
     // Download + load the requested variant (returns when all assets are present)
-    let models = try await AsrModels.downloadAndLoad(version: variant.asrVersion)
+    let models = try await AsrModels.downloadAndLoad(version: asrVersion)
     self.models = models
     let manager = AsrManager(config: .init())
     try await manager.loadModels(models)
@@ -176,10 +183,18 @@ actor ParakeetClient {
 }
 
 private extension ParakeetModel {
-  var asrVersion: AsrModelVersion {
-    switch self {
-    case .englishV2: return .v2
-    case .multilingualV3: return .v3
+  /// The TDT batch model version, or `nil` for non-batch engines (e.g. the
+  /// Nemotron streaming model, which `ParakeetClient` does not handle).
+  var asrVersion: AsrModelVersion? {
+    switch engine {
+    case .tdtBatch:
+      switch self {
+      case .englishV2: return .v2
+      case .multilingualV3: return .v3
+      case .nemotronStreamingMultilingual: return nil
+      }
+    case .nemotronStreaming:
+      return nil
     }
   }
 }
