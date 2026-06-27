@@ -7,6 +7,7 @@ struct CuratedRow: View {
 	@ObserveInjection var inject
 	@Bindable var store: StoreOf<ModelDownloadFeature>
 	let model: CuratedModelInfo
+	@State private var showStreamingInfo = false
 
 	var isSelected: Bool {
 		let selected = store.hexSettings.selectedModel
@@ -42,6 +43,9 @@ struct CuratedRow: View {
 								.background(Color.accentColor)
 								.clipShape(RoundedRectangle(cornerRadius: 4))
 						}
+						if model.parakeetModel?.isStreaming == true {
+							streamingInfoButton
+						}
 					}
 					HStack(spacing: 16) {
 						HStack(spacing: 6) {
@@ -59,10 +63,25 @@ struct CuratedRow: View {
 
 				// Trailing size and action/progress icons, aligned to the right
 				HStack(spacing: 12) {
-					Text(model.storageSize)
-						.foregroundStyle(.secondary)
-						.font(.subheadline)
-						.frame(width: 72, alignment: .trailing)
+					// Size with an adjacent reveal-in-Finder button (only when the
+					// model has files on disk).
+					HStack(spacing: 4) {
+						if model.isDownloaded {
+							Button {
+								store.send(.revealModel(model.internalName))
+							} label: {
+								Image(systemName: "folder")
+							}
+							.buttonStyle(.borderless)
+							.foregroundStyle(.secondary)
+							.help("Reveal in Finder")
+						}
+
+						Text(model.storageSize)
+							.foregroundStyle(.secondary)
+							.font(.subheadline)
+					}
+					.frame(width: 96, alignment: .trailing)
 
 					// Download/Progress/Downloaded at far right
 					ZStack {
@@ -121,5 +140,31 @@ struct CuratedRow: View {
 			}
 		}
 		.enableInjection()
+	}
+
+	/// Info affordance for streaming models, explaining the per-chunk download.
+	private var streamingInfoButton: some View {
+		Button {
+			showStreamingInfo = true
+		} label: {
+			Image(systemName: "info.circle")
+				.font(.caption)
+				.foregroundStyle(.secondary)
+		}
+		.buttonStyle(.plain)
+		.help("About chunk-size downloads")
+		.popover(isPresented: $showStreamingInfo, arrowEdge: .bottom) {
+			VStack(alignment: .leading, spacing: 8) {
+				Text("Streaming model")
+					.font(.headline)
+				Text("This model transcribes live as you speak. Each chunk size (set in the Streaming section) is a separate ~600 MB download.")
+					.font(.callout)
+				Text("Switching to a chunk size you haven't downloaded yet will need to download it before you can record at that size.")
+					.font(.callout)
+					.foregroundStyle(.secondary)
+			}
+			.padding(14)
+			.frame(width: 300)
+		}
 	}
 }

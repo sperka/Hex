@@ -149,6 +149,30 @@ actor ParakeetClient {
     }
   }
 
+  /// The on-disk folder for a downloaded Parakeet model, or nil if not present.
+  ///
+  /// FluidAudio stores the model under a folder whose name drops the `-coreml`
+  /// suffix from the identifier (e.g. id `parakeet-tdt-0.6b-v2-coreml` lands in
+  /// `parakeet-tdt-0.6b-v2`), so match on that stem rather than the exact id.
+  func modelDirectory(modelName: String) async -> URL? {
+    guard let variant = ParakeetModel(rawValue: modelName) else { return nil }
+    let fm = FileManager.default
+    let stem = variant.identifier.replacingOccurrences(of: "-coreml", with: "")
+    for root in candidateRoots() {
+      for vendor in vendorDirs {
+        let base = root.appendingPathComponent(vendor, isDirectory: true)
+        guard let items = try? fm.contentsOfDirectory(
+          at: base, includingPropertiesForKeys: [.isDirectoryKey], options: .skipsHiddenFiles
+        ) else { continue }
+        for item in items
+        where item.lastPathComponent.hasPrefix(stem) && directoryContainsMLModelC(item) {
+          return item
+        }
+      }
+    }
+    return nil
+  }
+
   /// Returns all candidate directories where a Parakeet model might be cached.
   /// Includes both exact matches and prefixed directories (e.g. versioned folders).
   private func modelDirectories(_ variant: ParakeetModel) -> [URL] {

@@ -39,6 +39,26 @@ actor NemotronStreamingClient {
     return FileManager.default.fileExists(atPath: metadata.path)
   }
 
+  /// The Nemotron repo folder to reveal, if *any* chunk/language variant is
+  /// cached (the reveal button cares about the model, not the current tier).
+  func modelDirectory(chunkMs: Int, languageCode: String) -> URL? {
+    let fm = FileManager.default
+    let root = (try? URL.hexParakeetModelsDirectory)
+      ?? fm.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        .appendingPathComponent("FluidAudio/Models", isDirectory: true)
+    let repoDir = root.appendingPathComponent(Self.repoFolder, isDirectory: true)
+    // Reveal the exact variant if present, else the repo folder if any variant
+    // was downloaded, else nil.
+    let variant = variantDirectory(chunkMs: chunkMs, languageCode: languageCode)
+    if fm.fileExists(atPath: variant.appendingPathComponent("metadata.json").path) {
+      return variant
+    }
+    if let contents = try? fm.contentsOfDirectory(atPath: repoDir.path), !contents.isEmpty {
+      return repoDir
+    }
+    return nil
+  }
+
   /// Downloads (if needed) and loads the requested variant into memory.
   /// Reuses the loaded manager when the chunk size and language are unchanged.
   func ensureLoaded(
@@ -173,6 +193,7 @@ actor NemotronStreamingClient {
 
 actor NemotronStreamingClient {
   func isModelAvailable(chunkMs: Int, languageCode: String) -> Bool { false }
+  func modelDirectory(chunkMs: Int, languageCode: String) -> URL? { nil }
   func ensureLoaded(chunkMs: Int, languageCode: String, progress: @escaping (Progress) -> Void) async throws {
     throw NSError(
       domain: "Nemotron",

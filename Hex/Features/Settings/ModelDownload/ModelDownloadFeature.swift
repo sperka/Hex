@@ -162,9 +162,15 @@ public struct ModelDownloadFeature {
 		case downloadProgress(Double)
 		case downloadCompleted(Result<String, Error>)
 		case cancelDownload
+		/// Cancel without surfacing a "Download cancelled" error - used when the
+		/// download is being abandoned by an intentional change (e.g. the user
+		/// switched chunk size), not by the user cancelling the download itself.
+		case cancelDownloadSilently
 
 		case deleteSelectedModel
 		case openModelLocation
+		/// Reveal a specific downloaded model's folder in Finder.
+		case revealModel(String)
 	}
 
 	// MARK: Dependencies
@@ -398,6 +404,17 @@ public struct ModelDownloadFeature {
 			}
 			return .cancel(id: id)
 
+		case .cancelDownloadSilently:
+			guard let id = state.activeDownloadID else { return .none }
+			state.isDownloading = false
+			state.downloadingModelName = nil
+			state.activeDownloadID = nil
+			state.$modelBootstrapState.withLock {
+				$0.progress = 0
+				$0.isModelReady = false
+			}
+			return .cancel(id: id)
+
 		case .deleteSelectedModel:
 			guard !state.selectedModel.isEmpty else { return .none }
 			state.$modelBootstrapState.withLock { $0.isModelReady = false }
@@ -412,6 +429,13 @@ public struct ModelDownloadFeature {
 
 		case .openModelLocation:
 			return openModelLocationEffect(for: state)
+
+		case let .revealModel(name):
+			return .run { _ in
+				if let url = await transcription.modelLocation(name) {
+					NSWorkspace.shared.activateFileViewerSelecting([url])
+				}
+			}
 		}
 	}
 
