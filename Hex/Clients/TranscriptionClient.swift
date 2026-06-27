@@ -51,6 +51,10 @@ struct TranscriptionClient {
   /// Whether the named model decodes live during recording (vs. file-based).
   var isStreamingModel: @Sendable (String) -> Bool = { _ in false }
 
+  /// The on-disk folder for a downloaded model, or `nil` if nothing is on disk
+  /// for it. Resolves the actual cache path (which differs from the model id).
+  var modelLocation: @Sendable (String) async -> URL? = { _ in nil }
+
   /// Transcribes live from a stream of 16 kHz mono Float32 sample chunks using a
   /// streaming model. Emits `.partial` updates as audio is decoded and a terminal
   /// `.final` when `samples` ends; the returned stream throws on load/decode
@@ -71,6 +75,7 @@ extension TranscriptionClient: DependencyKey {
       getRecommendedModels: { await live.getRecommendedModels() },
       getAvailableModels: { try await live.getAvailableModels() },
       isStreamingModel: { TranscriptionClientLive.isStreamingModel($0) },
+      modelLocation: { await live.modelLocation(for: $0) },
       transcribeStreaming: { await live.transcribeStreaming(samples: $0, model: $1, chunkMs: $2, languageCode: $3) }
     )
   }
@@ -353,6 +358,21 @@ actor TranscriptionClientLive {
 
   private func isParakeet(_ name: String) -> Bool {
     ParakeetModel(rawValue: name) != nil
+  }
+
+  /// Resolves the actual on-disk folder for `name`, or nil if not downloaded.
+  /// Routes to the engine that owns the model (their disk layouts differ from
+  /// the model identifier).
+  func modelLocation(for name: String) async -> URL? {
+    if isStreaming(name) {
+      let params = nemotronParams()
+      return await nemotron.modelDirectory(chunkMs: params.chunkMs, languageCode: params.languageCode)
+    }
+    if isParakeet(name) {
+      return await parakeet.modelDirectory(modelName: name)
+    }
+    let folder = modelPath(for: name)
+    return FileManager.default.fileExists(atPath: folder.path) ? folder : nil
   }
 
   /// Whether `name` is a streaming model (decodes live during recording).

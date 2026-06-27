@@ -71,6 +71,22 @@ struct TranscriptionIndicatorView: View {
   private let baseWidth: CGFloat = 16
   private let expandedWidth: CGFloat = 56
 
+  // Live-transcript bubble: grows horizontally until it hits `maxPartialFraction`
+  // of the screen width, then wraps downward up to `maxPartialLines` lines.
+  private let maxPartialFraction: CGFloat = 0.35
+  private let maxPartialLines: Int = 10
+  private let minPartialWidth: CGFloat = 40
+  private let partialFont: Font = .system(size: 12, weight: .medium)
+
+  /// Natural single-line width of the current partial text (measured offscreen).
+  @State private var measuredPartialWidth: CGFloat = 0
+
+  /// Max width for the live-transcript bubble before it wraps to new lines.
+  private var maxPartialWidth: CGFloat {
+    let screenWidth = NSScreen.main?.frame.width ?? 1440
+    return screenWidth * maxPartialFraction
+  }
+
   var isHidden: Bool {
     status == .hidden
   }
@@ -78,9 +94,21 @@ struct TranscriptionIndicatorView: View {
   @State var transcribeEffect = 0
 
   var body: some View {
+    VStack(spacing: 6) {
+      indicator
+      // Live streaming transcript below the indicator (away from the notch).
+      if !partialText.isEmpty {
+        partialBubble
+      }
+    }
+    .animation(.easeInOut(duration: 0.15), value: partialText)
+    .enableInjection()
+  }
+
+  private var indicator: some View {
     let averagePower = min(1, meter.averagePower * 3)
     let peakPower = min(1, meter.peakPower * 3)
-    ZStack {
+    return ZStack {
       Capsule()
         .fill(backgroundColor.shadow(.inner(color: innerShadowColor, radius: 4)))
         .overlay {
@@ -158,29 +186,57 @@ struct TranscriptionIndicatorView: View {
         .transition(.opacity)
         .zIndex(2)
       }
-
-      // Live streaming transcript while recording.
-      if !partialText.isEmpty {
-        Text(partialText)
-          .font(.system(size: 12, weight: .medium))
-          .foregroundColor(.white)
-          .lineLimit(2)
-          .truncationMode(.head)
-          .multilineTextAlignment(.center)
-          .frame(maxWidth: 280)
-          .padding(.horizontal, 10)
-          .padding(.vertical, 6)
-          .background(
-            RoundedRectangle(cornerRadius: 6)
-              .fill(Color.black.opacity(0.8))
-          )
-          .offset(y: -28)
-          .transition(.opacity)
-          .zIndex(3)
-      }
     }
-    .animation(.easeInOut(duration: 0.15), value: partialText)
-    .enableInjection()
+  }
+
+  /// Live transcript bubble shown below the indicator. Starts compact and grows
+  /// with the text horizontally up to `maxPartialWidth`, then wraps downward
+  /// (head-truncated) up to `maxPartialLines` so the newest words stay visible.
+  ///
+  /// SwiftUI's `Text` can't natively "hug content but wrap at a cap": a
+  /// `.frame(maxWidth:)` just fills the cap. So a hidden single-line copy
+  /// measures the text's natural width, and the real bubble is sized to
+  /// `min(naturalWidth, cap)` (clamped to a small minimum).
+  private var partialBubble: some View {
+    let width = max(minPartialWidth, min(measuredPartialWidth, maxPartialWidth))
+    return Text(partialText)
+      .font(partialFont)
+      .foregroundColor(.white)
+      .lineLimit(maxPartialLines)
+      .truncationMode(.head)
+      .multilineTextAlignment(.leading)
+      .frame(width: width, alignment: .leading)
+      .fixedSize(horizontal: false, vertical: true)
+      .padding(.horizontal, 10)
+      .padding(.vertical, 6)
+      .background(
+        RoundedRectangle(cornerRadius: 8)
+          .fill(Color.black.opacity(0.85))
+      )
+      .background(partialWidthMeasurer)
+      .transition(.opacity)
+  }
+
+  /// Hidden single-line copy that reports the text's natural (unwrapped) width.
+  private var partialWidthMeasurer: some View {
+    Text(partialText)
+      .font(partialFont)
+      .lineLimit(1)
+      .fixedSize()
+      .hidden()
+      .background(
+        GeometryReader { proxy in
+          Color.clear.preference(key: PartialWidthKey.self, value: proxy.size.width)
+        }
+      )
+      .onPreferenceChange(PartialWidthKey.self) { measuredPartialWidth = $0 }
+  }
+}
+
+private struct PartialWidthKey: PreferenceKey {
+  static var defaultValue: CGFloat = 0
+  static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+    value = max(value, nextValue())
   }
 }
 
@@ -189,6 +245,12 @@ struct TranscriptionIndicatorView: View {
     TranscriptionIndicatorView(status: .hidden, meter: .init(averagePower: 0, peakPower: 0))
     TranscriptionIndicatorView(status: .optionKeyPressed, meter: .init(averagePower: 0, peakPower: 0))
     TranscriptionIndicatorView(status: .recording, meter: .init(averagePower: 0.5, peakPower: 0.5))
+    TranscriptionIndicatorView(status: .recording, meter: .init(averagePower: 0.5, peakPower: 0.5), partialText: "Short partial")
+    TranscriptionIndicatorView(
+      status: .recording,
+      meter: .init(averagePower: 0.5, peakPower: 0.5),
+      partialText: "This is a much longer live transcript that should grow horizontally and then wrap downward across several lines once it reaches about a third of the screen width."
+    )
     TranscriptionIndicatorView(status: .transcribing, meter: .init(averagePower: 0, peakPower: 0))
     TranscriptionIndicatorView(status: .prewarming, meter: .init(averagePower: 0, peakPower: 0))
   }

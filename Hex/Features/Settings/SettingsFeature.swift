@@ -84,6 +84,8 @@ struct SettingsFeature {
     case setSelectedMicrophoneID(String?)
     case setSoundEffectsEnabled(Bool)
     case setSoundEffectsVolume(Double)
+    case setNemotronChunkMs(Int)
+    case setShowLivePartials(Bool)
 
     // Permission delegation (forwarded to AppFeature)
     case requestMicrophone
@@ -449,6 +451,28 @@ struct SettingsFeature {
 
       case let .setRecordingAudioBehavior(behavior):
         state.$hexSettings.withLock { $0.recordingAudioBehavior = behavior }
+        return .none
+
+      case let .setNemotronChunkMs(chunkMs):
+        guard chunkMs != state.hexSettings.nemotronChunkMs else { return .none }
+        state.$hexSettings.withLock { $0.nemotronChunkMs = chunkMs }
+        // The chunk size selects a distinct on-disk variant, so re-check
+        // availability: a not-yet-downloaded tier must show as missing (and
+        // clear isModelReady) instead of silently downloading at record time.
+        // If a download for the old tier is in flight, cancel it first - it's
+        // fetching a variant the user just moved away from.
+        let isDownloadingStreaming = state.modelDownload.isDownloading
+          && (ParakeetModel(rawValue: state.modelDownload.downloadingModelName ?? "")?.isStreaming ?? false)
+        if isDownloadingStreaming {
+          return .concatenate(
+            .send(.modelDownload(.cancelDownloadSilently)),
+            .send(.modelDownload(.fetchModels))
+          )
+        }
+        return .send(.modelDownload(.fetchModels))
+
+      case let .setShowLivePartials(enabled):
+        state.$hexSettings.withLock { $0.showLivePartials = enabled }
         return .none
 
       case let .toggleSuperFastMode(enabled):
