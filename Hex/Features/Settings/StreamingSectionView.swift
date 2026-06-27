@@ -23,6 +23,13 @@ struct StreamingSectionView: View {
 		)
 	}
 
+	private var autoDownloadChunkOnChange: Binding<Bool> {
+		Binding(
+			get: { store.hexSettings.autoDownloadChunkOnChange },
+			set: { store.send(.setAutoDownloadChunkOnChange($0)) }
+		)
+	}
+
 	private func chunkLabel(_ ms: Int) -> String {
 		String(format: "%.2fs", Double(ms) / 1000.0)
 	}
@@ -50,6 +57,9 @@ struct StreamingSectionView: View {
 					}
 				}
 				Text("Larger chunks improve accuracy and punctuation; smaller chunks lower latency. 0.56s can drop punctuation on long sessions (FluidAudio #687).")
+					.settingsCaption()
+				Toggle("Auto-download when chunk size changes", isOn: autoDownloadChunkOnChange)
+				Text("Each chunk size is a separate ~600 MB download. Off by default so an accidental change won't start a large download on limited connections.")
 					.settingsCaption()
 				chunkDownloadStatus
 			} icon: {

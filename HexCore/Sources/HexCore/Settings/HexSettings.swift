@@ -49,6 +49,7 @@ public struct HexSettings: Codable, Equatable, Sendable {
 	public var wordRemappings: [WordRemapping]
 	public var nemotronChunkMs: Int
 	public var showLivePartials: Bool
+	public var autoDownloadChunkOnChange: Bool
 
 	/// Allowed Nemotron streaming chunk-size tiers in milliseconds. 560 ms gives
 	/// the lowest latency but degrades punctuation on long sessions (FluidAudio
@@ -93,7 +94,8 @@ public struct HexSettings: Codable, Equatable, Sendable {
 		wordRemovals: [WordRemoval] = HexSettings.defaultWordRemovals,
 		wordRemappings: [WordRemapping] = [],
 		nemotronChunkMs: Int = 2240,
-		showLivePartials: Bool = true
+		showLivePartials: Bool = true,
+		autoDownloadChunkOnChange: Bool = false
 	) {
 		self.soundEffectsEnabled = soundEffectsEnabled
 		self.soundEffectsVolume = soundEffectsVolume
@@ -121,6 +123,7 @@ public struct HexSettings: Codable, Equatable, Sendable {
 		self.wordRemappings = wordRemappings
 		self.nemotronChunkMs = nemotronChunkMs
 		self.showLivePartials = showLivePartials
+		self.autoDownloadChunkOnChange = autoDownloadChunkOnChange
 		normalizeDoubleTapSettings()
 		normalizeNemotronChunkMs()
 	}
@@ -173,6 +176,7 @@ private enum HexSettingKey: String, CodingKey, CaseIterable {
 	case wordRemappings
 	case nemotronChunkMs
 	case showLivePartials
+	case autoDownloadChunkOnChange
 }
 
 private struct SettingsField<Value: Codable & Sendable> {
@@ -307,6 +311,7 @@ private enum HexSettingsSchema {
 			default: defaults.wordRemappings
 		).eraseToAny(),
 		SettingsField(.nemotronChunkMs, keyPath: \.nemotronChunkMs, default: defaults.nemotronChunkMs).eraseToAny(),
-		SettingsField(.showLivePartials, keyPath: \.showLivePartials, default: defaults.showLivePartials).eraseToAny()
+		SettingsField(.showLivePartials, keyPath: \.showLivePartials, default: defaults.showLivePartials).eraseToAny(),
+		SettingsField(.autoDownloadChunkOnChange, keyPath: \.autoDownloadChunkOnChange, default: defaults.autoDownloadChunkOnChange).eraseToAny()
 	]
 }
