@@ -86,6 +86,7 @@ struct SettingsFeature {
     case setSoundEffectsVolume(Double)
     case setNemotronChunkMs(Int)
     case setShowLivePartials(Bool)
+    case setAutoDownloadChunkOnChange(Bool)
 
     // Permission delegation (forwarded to AppFeature)
     case requestMicrophone
@@ -463,16 +464,35 @@ struct SettingsFeature {
         // fetching a variant the user just moved away from.
         let isDownloadingStreaming = state.modelDownload.isDownloading
           && (ParakeetModel(rawValue: state.modelDownload.downloadingModelName ?? "")?.isStreaming ?? false)
+        let autoDownload = state.hexSettings.autoDownloadChunkOnChange
+        let streamingModel = state.hexSettings.selectedModel
+        let isStreamingSelected = transcription.isStreamingModel(streamingModel)
+        // After re-fetching availability, optionally auto-download the new tier
+        // if the user opted in and it isn't already on disk.
+        let maybeAutoDownload: Effect<Action> = .run { send in
+          guard autoDownload, isStreamingSelected else { return }
+          if await !transcription.isModelDownloaded(streamingModel) {
+            await send(.modelDownload(.downloadSelectedModel))
+          }
+        }
         if isDownloadingStreaming {
           return .concatenate(
             .send(.modelDownload(.cancelDownloadSilently)),
-            .send(.modelDownload(.fetchModels))
+            .send(.modelDownload(.fetchModels)),
+            maybeAutoDownload
           )
         }
-        return .send(.modelDownload(.fetchModels))
+        return .concatenate(
+          .send(.modelDownload(.fetchModels)),
+          maybeAutoDownload
+        )
 
       case let .setShowLivePartials(enabled):
         state.$hexSettings.withLock { $0.showLivePartials = enabled }
+        return .none
+
+      case let .setAutoDownloadChunkOnChange(enabled):
+        state.$hexSettings.withLock { $0.autoDownloadChunkOnChange = enabled }
         return .none
 
       case let .toggleSuperFastMode(enabled):
