@@ -152,6 +152,57 @@ actor NemotronStreamingClient {
     return try await manager.finish()
   }
 
+  /// Transcribes a complete audio file in one shot (no live recording). Loads
+  /// the variant if needed, then feeds the file's audio through the streaming
+  /// manager and returns the final transcript. The manager resamples to 16 kHz
+  /// mono internally via `process(audioBuffer:)`.
+  func transcribeFile(
+    url: URL,
+    chunkMs: Int,
+    languageCode: String,
+    progress: @escaping (Progress) -> Void
+  ) async throws -> String {
+    // Load silently; `progress` is reserved for decode progress below so the
+    // job bar reflects transcription, not the (usually instant) model load.
+    try await ensureLoaded(chunkMs: chunkMs, languageCode: languageCode, progress: { _ in })
+    guard let manager else {
+      throw NSError(
+        domain: "Nemotron",
+        code: -1,
+        userInfo: [NSLocalizedDescriptionKey: "Nemotron not initialized"]
+      )
+    }
+    await manager.reset()
+
+    let file = try AVAudioFile(forReading: url)
+    let format = file.processingFormat
+    let totalFrames = file.length
+    guard totalFrames > 0 else {
+      throw NSError(
+        domain: "Nemotron",
+        code: -6,
+        userInfo: [NSLocalizedDescriptionKey: "Could not read audio from \(url.lastPathComponent)"]
+      )
+    }
+
+    // Read + feed in ~5s blocks so we can report real decode progress (feeding
+    // the whole file at once would jump straight from 0 to 100).
+    let blockFrames = AVAudioFrameCount(format.sampleRate * 5)
+    var framesFed: AVAudioFramePosition = 0
+    let p = Progress(totalUnitCount: totalFrames)
+    while framesFed < totalFrames {
+      guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: blockFrames) else { break }
+      try file.read(into: buffer, frameCount: blockFrames)
+      let read = AVAudioFramePosition(buffer.frameLength)
+      if read == 0 { break }
+      _ = try await manager.process(audioBuffer: buffer)
+      framesFed += read
+      p.completedUnitCount = framesFed
+      progress(p)
+    }
+    return try await manager.finish()
+  }
+
   /// Deletes cached model files for the given variant and resets live state if
   /// the deleted variant was the one loaded.
   func deleteCaches(chunkMs: Int, languageCode: String) async throws {
@@ -208,6 +259,9 @@ actor NemotronStreamingClient {
     throw NSError(domain: "Nemotron", code: -3, userInfo: [NSLocalizedDescriptionKey: "Nemotron not available"])
   }
   func finishUtterance() async throws -> String {
+    throw NSError(domain: "Nemotron", code: -3, userInfo: [NSLocalizedDescriptionKey: "Nemotron not available"])
+  }
+  func transcribeFile(url: URL, chunkMs: Int, languageCode: String, progress: @escaping (Progress) -> Void) async throws -> String {
     throw NSError(domain: "Nemotron", code: -3, userInfo: [NSLocalizedDescriptionKey: "Nemotron not available"])
   }
   func deleteCaches(chunkMs: Int, languageCode: String) async throws {}

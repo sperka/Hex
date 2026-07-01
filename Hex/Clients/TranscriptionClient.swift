@@ -280,12 +280,19 @@ actor TranscriptionClientLive {
   ) async throws -> String {
     let startAll = Date()
     if isStreaming(model) {
-      // Streaming models decode live via transcribeStreaming, not from a file.
-      throw NSError(
-        domain: "TranscriptionClient",
-        code: -5,
-        userInfo: [NSLocalizedDescriptionKey: "\(model) is a streaming model; use transcribeStreaming, not file-based transcribe"]
+      // Streaming models normally decode live, but for file import we feed the
+      // whole file through the streaming manager in one shot.
+      let params = nemotronParams()
+      transcriptionLogger.notice("Transcribing with Nemotron (file) model=\(model) file=\(url.lastPathComponent)")
+      let text = try await nemotron.transcribeFile(
+        url: url,
+        chunkMs: params.chunkMs,
+        languageCode: params.languageCode,
+        progress: progressCallback
       )
+      currentModelName = model
+      transcriptionLogger.info("Nemotron file request total elapsed \(String(format: "%.2f", Date().timeIntervalSince(startAll)))s")
+      return text
     }
     if isParakeet(model) {
       transcriptionLogger.notice("Transcribing with Parakeet model=\(model) file=\(url.lastPathComponent)")
